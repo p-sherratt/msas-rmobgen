@@ -1,0 +1,20 @@
+
+datapath: ../meteor
+outfile_prefix: ChangeMe
+upload_to_rmob: false
+
+info:
+    logo: # resources/msas-dome-mini.png
+    observer: 
+    country: 
+    city: 
+    location: 1°13'21W 53°06'50N # change me
+    beacon: GRAVES # change me
+    frequency: 143.050 MHz # change me
+    antenna: 
+    receiver: 
+    method: Back Scatter # change me
+    azimuth: 135 # change me
+    elevation: 10 # change me
+    website: 
+    email: 
