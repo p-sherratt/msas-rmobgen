@@ -1,31 +1,88 @@
 #!/usr/bin/env python3
 
 import re
+import time
 import ftplib
 import datetime
-from calendar import monthrange
-from collections import defaultdict
-from PIL import Image, ImageDraw, ImageFont
+import argparse
 import yaml
+from collections import defaultdict
+from calendar import monthrange
+from PIL import Image, ImageDraw, ImageFont
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
 
 
-def rmob_export(config_path="rmob.yaml"):
-    config = RmobConfig(config_path)
-    data = RmobData(config)
+# todo - import logging and show it some <s>hate</s>love.
+
+def rmob_main(args):
+    config = RmobConfig(args.config_file)
+
+    if args.watch:
+        observer = Observer()
+        handler = FileChangeHandler(lambda: rmob_export(config, args.upload, args.denoise, None))
+        observer.schedule(handler, config.datapath)
+        observer.start()
+        month = None
+        try:
+            while True:
+                today = datetime.date.today()
+                if month != today:
+                    month = today
+                    month_str = month.strftime("%Y%m")
+                    handler.set_file_path("{}/RMOB-{}.dat".format(config.datapath, month_str))
+                time.sleep(5)
+                handler.tick(5)
+        except KeyboardInterrupt:
+            observer.stop()
+        observer.join()
+
+    else:
+        rmob_export(config, args.upload, args.denoise, args.month)
+
+
+class FileChangeHandler(FileSystemEventHandler):
+    def __init__(self, handler_func):
+        self.file_path = None
+        self.cooldown = 0
+        self._handler_func = handler_func
+
+    def on_any_event(self, event):
+        if self.cooldown > 0:
+            return
+        if self.file_path != event.src_path:
+            return
+        if event.event_type not in ("created", "modified"):
+            return
+        self.cooldown += 1500
+        self._handler_func()
+
+    def set_file_path(self, file_path):
+        self.file_path = file_path
+
+    def set_handler_func(self, handler_func):
+        self._handler_func = handler_func
+
+    def tick(self, seconds):
+        self.cooldown = max(self.cooldown - seconds, 0)
+
+
+def rmob_export(config, upload, denoise, month):
+    if month is None:
+        _month = datetime.datetime.now()
+    else:
+        _month = datetime.datetime.strptime(month, "%Y-%m")
+    data = RmobData(config, _month)
     path_txt = data.export_rmob_txt()
     img = RmobColorgramme(data)
     img.render()
     path_img = img.save()
-    if config.upload_to_rmob:
+    if upload and config.upload_to_rmob:
         session = ftplib.FTP("217.169.242.217", "radiodata", "meteor")
-
-        def _upload(path):
+        for path in (path_txt, path_img):
             filename = path.split("/")[-1]
             with open(path, "rb") as stream:
-                session.storbinary(f"STOR /{filename}", stream)
-
-        _upload(path_txt)
-        _upload(path_img)
+                session.storbinary("STOR /{}".format(filename), stream)
         session.quit()
 
 
@@ -90,7 +147,7 @@ class RmobData:
     def __init__(self, rmob_config, month=None):
         self.config = rmob_config
         self.diurnal = {}
-        self.first_date = 3_652_059
+        self.first_date = 3652059
         self.last_date = 0
         self.thresholds = {}
         self.update(month)
@@ -99,10 +156,8 @@ class RmobData:
         if month is None:
             month = datetime.datetime.today()
         month_str = month.strftime("%Y%m")
-        path = f"{self.config.datapath}/RMOB-{month_str}.dat"
+        path = "{}/RMOB-{}.dat".format(self.config.datapath, month_str)
         date_ord = month.toordinal()
-        self.first_date = min(self.first_date, date_ord)
-        self.last_date = max(self.last_date, date_ord)
 
         rows = []
         with open(path, "r") as data:
@@ -122,8 +177,13 @@ class RmobData:
             hour = cols[1]
             count = int(cols[2])
 
-            date = f"{year}-{month}-{day}"
-            diurnal[date][int(hour)] = count
+            date = datetime.date(year=int(year), month=int(month), day=int(day))
+            date_ord = date.toordinal()
+            date_str = "{}-{}-{}".format(year, month, day)
+            diurnal[date_str][int(hour)] = count
+
+            self.first_date = min(self.first_date, date_ord)
+            self.last_date = max(self.last_date, date_ord)
 
         counts = []
         for date in sorted(diurnal):
@@ -141,47 +201,53 @@ class RmobData:
         _, days_in_month = monthrange(date.year, date.month)
         if path is None:
             month_rev = date.strftime("%m%Y")
-            path = f"{self.config.outfile_prefix}_{month_rev}rmob.TXT"
+            path = "{}_{}rmob.TXT".format(self.config.outfile_prefix, month_rev)
 
         with open(path, "w") as stream:
             heading = date.strftime("%b").lower() + "|"
-            heading += "".join(f" {h:02}h|" for h in range(0, 24))
+            heading += "".join(" {:02}h|".format(h) for h in range(0, 24))
             stream.write(heading + "\n")
             for day in range(1, days_in_month + 1):
                 date = date.replace(day=day)
                 date_str = date.strftime("%Y-%m-%d")
+
                 try:
                     counts = self.diurnal[date_str]
                 except KeyError:
                     counts = {}
+
                 try:
                     threshold = self.thresholds[date.toordinal()]
                 except KeyError:
-                    threshold = 999_999
-                row = f" {day:02}|"
+                    threshold = 999999
+
+                row = " {:02}|".format(day)
                 for h in range(24):
                     if h not in counts or counts[h] > threshold:
                         row += "??? |"
                         continue
-                    count = f"{counts[h]:03}"
-                    count = f"{count:4}|"
+                    count = "{:03}".format(counts[h])
+                    count = "{:4}|".format(count)
                     row += count
                 stream.write(row + "\n")
-            stream.write(f"[Observer]{info['observer']}\n")
-            stream.write(f"[Country]{info['country']}\n")
-            stream.write(f"[City]{info['city']}\n")
-            stream.write(f"[Longitude]{self.config.lng}\n")
-            stream.write(f"[Latitude ]{self.config.lat}\n")
-            stream.write(f"[Longitude GMAP]{self.config.lng_dec}\n")
-            stream.write(f"[Latitude GMAP]{self.config.lat_dec}\n")
-            stream.write(f"[Frequencies]{info['frequency']}\n")
-            stream.write(f"[Antenna]{info['antenna']}\n")
-            stream.write(f"[Pre-Amplifier]{info['preamp']}\n")
-            stream.write(f"[Receiver]{info['receiver']}\n")
-            stream.write(f"[Observing Method]{info['method']}\n")
-            stream.write(f"[Remarks]{info['computer']}\n")
-            stream.write(f"[Soft FTP]{self.config.version}\n")
-            stream.write(f"[E]{info['email']}\n")
+
+            for field in (
+                ('Observer', info['observer']),
+                ('Country', info['country']),
+                ('City', info['city']),
+                ('Longitude', self.config.lng),
+                ('Latitude ', self.config.lat),
+                ('Longitude GMAP', self.config.lng_dec),
+                ('Frequencies', self.config.lat_dec),
+                ('Antenna', info['antenna']),
+                ('Pre-Amplifier', info['preamp']),
+                ('Receiver', info['receiver']),
+                ('Observing Method', info['method']),
+                ('Remarks', info['computer']),
+                ('Soft FTP', self.config.version),
+                ('E', info['email'])
+            ):
+                stream.write("[{}]{}\n".format(*field))
 
         return path
 
@@ -208,7 +274,7 @@ class RmobColorgramme:
         if plot_type == "month":
             self.render_month(start_date)
         else:
-            raise Exception(f"unsupported plot type: {plot_type}")
+            raise Exception("unsupported plot type: {}".format(plot_type))
 
     def render_month(self, month=None):
         if month is None:
@@ -300,7 +366,20 @@ class RmobColorgramme:
 
     def _render_heatmap(self, xy=(407, 15)):
         d = self._img_draw
-        threshold = self.data.thresholds[self.data.last_date]
+        peak = (0, 0)
+        threshold_avg = sum(self.data.thresholds.values()) / len(self.data.thresholds)
+
+        for date in self.data.diurnal:
+            hours = self.data.diurnal[date]
+            date_ord = datetime.datetime.strptime(date, "%Y-%m-%d").toordinal()
+            try:
+                threshold = self.data.thresholds[date_ord]
+            except KeyError:
+                threshold = threshold_avg
+
+            for hour, count in hours.items():
+                if count > peak[1] and count <= threshold:
+                    peak = (hour, count)
 
         # draw canvas for heatmap & scale bar
         d.rectangle([xy, (xy[0] + 247, xy[1] + 191)], outline="black", fill="black")
@@ -347,13 +426,13 @@ class RmobColorgramme:
         d.text((xy[0] + 260, xy[1] - 1), "0", font=__class__.IMG_FONT, fill="black")
         d.text(
             (xy[0] + 260, xy[1] + 91),
-            str(int(threshold / 2)),
+            str(int(peak[1] / 2)),
             font=__class__.IMG_FONT,
             fill="black",
         )
         d.text(
             (xy[0] + 260, xy[1] + 182),
-            str(int(threshold)),
+            str(int(peak[1])),
             font=__class__.IMG_FONT,
             fill="black",
         )
@@ -364,7 +443,7 @@ class RmobColorgramme:
             day = int(date[8:])
             for hour in sorted(hours):
                 count = hours[hour]
-                color = self._get_color(count, threshold)
+                color = self._get_color(count, max(1, peak[1]))
                 x = xy[0] + day * 8 - 7
                 y = 16 + hour * 8
                 d.rectangle([(x, y), (x + 5, y + 5)], fill=color)
@@ -431,7 +510,7 @@ class RmobColorgramme:
                     outline=(128, 128, 128),
                 )
             else:
-                bar_height = 88 * counts[hour] / threshold
+                bar_height = 88 * counts[hour] / max(peak[1], 1)
                 d.rectangle(
                     [(x - 3, xy[1] + 95 - bar_height), (x + 3, xy[1] + 95)],
                     outline="black",
@@ -485,7 +564,7 @@ class RmobColorgramme:
 
         if path is None:
             month_rev = datetime.date.fromordinal(self.data.last_date).strftime("%m%Y")
-            path = f"{self.data.config.outfile_prefix}_{month_rev}.jpg"
+            path = "{}_{}.jpg".format(self.data.config.outfile_prefix, month_rev)
 
         kwargs = {}
         if path.endswith(".jpg"):
@@ -495,5 +574,34 @@ class RmobColorgramme:
         return path
 
 
+class NegateAction(argparse.Action):
+    def __call__(self, parser, ns, values, option):
+        setattr(ns, self.dest, option[2:4] != "no")
+
+
 if __name__ == "__main__":
-    rmob_export()
+    parser = argparse.ArgumentParser(
+        description="Generate and upload RMOB colorgrammes & data."
+    )
+    parser.add_argument(
+        "--upload", action="store_true", help="upload generated files to rmob"
+    )
+    parser.add_argument(
+        "--denoise",
+        "--no-denoise",
+        dest="denoise",
+        action=NegateAction,
+        help="detect and mask outliers",
+    )
+    parser.add_argument("--month", help="month to generate data for (YYYY-MM)")
+    parser.add_argument(
+        "--watch",
+        "-w",
+        action="store_true",
+        help="run forever, watching for data file updates",
+    )
+    parser.add_argument("config_file", type=str, help="path to rmob config file")
+    args = parser.parse_args()
+    rmob_main(args)
+
+
