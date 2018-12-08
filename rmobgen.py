@@ -136,11 +136,12 @@ class RmobConfig:
             loc[0] = loc[0][:-1] + " " + loc[0][-1:]
         if loc[1][-2].isdigit():
             loc[1] = loc[1][:-1] + " " + loc[1][-1:]
-        lat_then_lng = loc[0][-1] in ("N", "S")
-        self.lat = loc[lat_then_lng]
-        self.lng = loc[not lat_then_lng]
-        self.lat_dec = dms2dec(loc[lat_then_lng])
-        self.lng_dec = dms2dec(loc[not lat_then_lng])
+
+        lng_then_lat = loc[0][-1] in ("N", "S")
+        self.lat = loc[not lng_then_lat]
+        self.lng = loc[lng_then_lat]
+        self.lat_dec = dms2dec(loc[not lng_then_lat])
+        self.lng_dec = dms2dec(loc[lng_then_lat])
 
 
 class RmobData:
